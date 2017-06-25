@@ -488,6 +488,7 @@ static const char* kPinset_google_Data[] = {
   kGOOGLE_PIN_GoogleG2Fingerprint,
   kGoogleBackup2048Fingerprint,
   kGeoTrust_Global_CAFingerprint,
+  kGlobalSign_Root_CA___R2Fingerprint,
 };
 static const StaticFingerprints kPinset_google = {
   sizeof(kPinset_google_Data) / sizeof(const char*),
@@ -696,6 +697,7 @@ struct TransportSecurityPreload {
 
 /* Sort hostnames for binary search. */
 static const TransportSecurityPreload kPublicKeyPinningPreloadList[] = {
+  { "0.me.uk", true, true, false, -1, &kPinset_nightx },
   { "2mdn.net", true, false, false, -1, &kPinset_google_root_pems },
   { "accounts.firefox.com", true, false, true, 4, &kPinset_mozilla_services },
   { "accounts.google.com", true, false, false, -1, &kPinset_google_root_pems },
@@ -750,6 +752,9 @@ static const TransportSecurityPreload kPublicKeyPinningPreloadList[] = {
   { "codereview.chromium.org", true, false, false, -1, &kPinset_google_root_pems },
   { "contributor.google.com", true, false, false, -1, &kPinset_google_root_pems },
   { "cr.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
+  { "crbug.com", true, false, false, -1, &kPinset_google_root_pems },
+  { "crosbug.com", true, false, false, -1, &kPinset_google_root_pems },
+  { "crrev.com", true, false, false, -1, &kPinset_google_root_pems },
   { "ct.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
   { "de.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
   { "dev.twitter.com", true, false, false, -1, &kPinset_twitterCom },
@@ -1061,6 +1066,7 @@ static const TransportSecurityPreload kPublicKeyPinningPreloadList[] = {
   { "mw.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
   { "mx.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
   { "myaccount.google.com", true, false, false, -1, &kPinset_google_root_pems },
+  { "myactivity.google.com", true, false, false, -1, &kPinset_google_root_pems },
   { "ni.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
   { "nightx.uk", true, true, false, -1, &kPinset_nightx },
   { "nl.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
@@ -1111,6 +1117,7 @@ static const TransportSecurityPreload kPublicKeyPinningPreloadList[] = {
   { "talkgadget.google.com", true, false, false, -1, &kPinset_google_root_pems },
   { "test-mode.pinning.example.com", true, true, false, -1, &kPinset_mozilla_test },
   { "th.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
+  { "themathematician.uk", true, true, false, -1, &kPinset_nightx },
   { "torproject.org", false, false, false, -1, &kPinset_tor },
   { "touch.facebook.com", true, false, false, -1, &kPinset_facebook },
   { "tr.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
@@ -1162,8 +1169,8 @@ static const TransportSecurityPreload kPublicKeyPinningPreloadList[] = {
   { "zh.search.yahoo.com", false, true, false, -1, &kPinset_yahoo },
 };
 
-// Pinning Preload List Length = 464;
+// Pinning Preload List Length = 470;
 
 static const int32_t kUnknownId = -1;
 
-static const PRTime kPreloadPKPinsExpirationTime = INT64_C(1488897094671000);
+static const PRTime kPreloadPKPinsExpirationTime = INT64_C(1500476096155000);

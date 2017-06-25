@@ -1435,8 +1435,9 @@ nsIDocument::nsIDocument()
     mFontFaceSetDirty(true),
     mGetUserFontSetCalled(false),
     mPostedFlushUserFontSet(false),
-    mPartID(0),
     mDidFireDOMContentLoaded(true),
+    mFrameRequestCallbacksScheduled(false),
+    mPartID(0),
     mSVGStatus(mozilla::dom::SVGStatus_Unknown),
     mUserHasInteracted(false)
 {
@@ -1961,6 +1962,9 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsDocument)
   tmp->mSubDocuments = nullptr;
 
   tmp->mFrameRequestCallbacks.Clear();
+  MOZ_RELEASE_ASSERT(!tmp->mFrameRequestCallbacksScheduled,
+                     "How did we get here without our presshell going away "
+                     "first?");
 
   tmp->mRadioGroups.Clear();
 
@@ -3689,7 +3693,7 @@ nsDocument::doCreateShell(nsPresContext* aContext,
 
   mExternalResourceMap.ShowViewers();
 
-  MaybeRescheduleAnimationFrameNotifications();
+  UpdateFrameRequestCallbackSchedulingState();
 
   // Now that we have a shell, we might have @font-face rules.
   RebuildUserFontSet();
@@ -3698,17 +3702,30 @@ nsDocument::doCreateShell(nsPresContext* aContext,
 }
 
 void
-nsDocument::MaybeRescheduleAnimationFrameNotifications()
+nsIDocument::UpdateFrameRequestCallbackSchedulingState(nsIPresShell* aOldShell)
 {
-  if (!mPresShell || !IsEventHandlingEnabled()) {
-    // bail out for now, until one of those conditions changes
+  // If the condition for shouldBeScheduled changes to depend on some other
+  // variable, add UpdateFrameRequestCallbackSchedulingState() calls to the
+  // places where that variable can change.
+  bool shouldBeScheduled =
+    mPresShell && IsEventHandlingEnabled() && !AnimationsPaused() &&
+    !mFrameRequestCallbacks.IsEmpty();
+  if (shouldBeScheduled == mFrameRequestCallbacksScheduled) {
+    // nothing to do
     return;
   }
 
-  nsRefreshDriver* rd = mPresShell->GetPresContext()->RefreshDriver();
-  if (!mFrameRequestCallbacks.IsEmpty()) {
+  nsIPresShell* presShell = aOldShell ? aOldShell : mPresShell;
+  MOZ_RELEASE_ASSERT(presShell);
+
+  nsRefreshDriver* rd = presShell->GetPresContext()->RefreshDriver();
+  if (shouldBeScheduled) {
     rd->ScheduleFrameRequestCallbacks(this);
+  } else {
+    rd->RevokeFrameRequestCallbacks(this);
   }
+
+  mFrameRequestCallbacksScheduled = shouldBeScheduled;
 }
 
 void
@@ -3716,6 +3733,9 @@ nsIDocument::TakeFrameRequestCallbacks(FrameRequestCallbackList& aCallbacks)
 {
   aCallbacks.AppendElements(mFrameRequestCallbacks);
   mFrameRequestCallbacks.Clear();
+  // No need to manually remove ourselves from the refresh driver; it will
+  // handle that part.  But we do have to update our state.
+  mFrameRequestCallbacksScheduled = false;
 }
 
 bool
@@ -3763,9 +3783,6 @@ void
 nsDocument::DeleteShell()
 {
   mExternalResourceMap.HideViewers();
-  if (IsEventHandlingEnabled() && !AnimationsPaused()) {
-    RevokeAnimationFrameNotifications();
-  }
   if (nsPresContext* presContext = mPresShell->GetPresContext()) {
     presContext->RefreshDriver()->CancelPendingEvents(this);
   }
@@ -3781,16 +3798,9 @@ nsDocument::DeleteShell()
   // objects for @font-face rules that came from the style set.
   RebuildUserFontSet();
 
+  nsIPresShell* oldShell = mPresShell;
   mPresShell = nullptr;
-}
-
-void
-nsDocument::RevokeAnimationFrameNotifications()
-{
-  if (!mFrameRequestCallbacks.IsEmpty()) {
-    mPresShell->GetPresContext()->RefreshDriver()->
-      RevokeFrameRequestCallbacks(this);
-  }
+  UpdateFrameRequestCallbackSchedulingState(oldShell);
 }
 
 static void
@@ -4522,10 +4532,6 @@ nsDocument::SetScriptGlobalObject(nsIScriptGlobalObject *aScriptGlobalObject)
     // our layout history state now.
     mLayoutHistoryState = GetLayoutHistoryState();
 
-    if (mPresShell && !EventHandlingSuppressed() && !AnimationsPaused()) {
-      RevokeAnimationFrameNotifications();
-    }
-
     // Also make sure to remove our onload blocker now if we haven't done it yet
     if (mOnloadBlockCount != 0) {
       nsCOMPtr<nsILoadGroup> loadGroup = GetDocumentLoadGroup();
@@ -4535,7 +4541,17 @@ nsDocument::SetScriptGlobalObject(nsIScriptGlobalObject *aScriptGlobalObject)
     }
   }
 
+  // BlockOnload() might be called before mScriptGlobalObject is set.
+  // We may need to add the blocker once mScriptGlobalObject is set.
+  bool needOnloadBlocker = !mScriptGlobalObject && aScriptGlobalObject;
+
   mScriptGlobalObject = aScriptGlobalObject;
+
+  if (needOnloadBlocker) {
+    EnsureOnloadBlocker();
+  }
+
+  UpdateFrameRequestCallbackSchedulingState();
 
   if (aScriptGlobalObject) {
     mHasHadScriptHandlingObject = true;
@@ -4571,7 +4587,6 @@ nsDocument::SetScriptGlobalObject(nsIScriptGlobalObject *aScriptGlobalObject)
       }
     }
 
-    MaybeRescheduleAnimationFrameNotifications();
     mRegistry = new Registry();
   }
 
@@ -8634,11 +8649,18 @@ nsDocument::EnumerateSubDocuments(nsSubDocEnumFunc aCallback, void *aData)
     return;
   }
 
+  // PLDHashTable::Iterator can't handle modifications while iterating so we
+  // copy all entries to an array first before calling any callbacks.
+  nsAutoTArray<nsCOMPtr<nsIDocument>, 8> subdocs;
   for (auto iter = mSubDocuments->Iter(); !iter.Done(); iter.Next()) {
     auto entry = static_cast<SubDocMapEntry*>(iter.Get());
     nsIDocument* subdoc = entry->mSubDocument;
-    bool next = subdoc ? aCallback(subdoc, aData) : true;
-    if (!next) {
+    if (subdoc) {
+      subdocs.AppendElement(subdoc);
+    }
+  }
+  for (auto subdoc : subdocs) {
+    if (!aCallback(subdoc, aData)) {
       break;
     }
   }
@@ -9532,16 +9554,13 @@ void
 nsDocument::SuppressEventHandling(nsIDocument::SuppressionType aWhat,
                                   uint32_t aIncrease)
 {
-  if (mEventsSuppressed == 0 && mAnimationsPaused == 0 &&
-      aIncrease != 0 && mPresShell && mScriptGlobalObject) {
-    RevokeAnimationFrameNotifications();
-  }
-
   if (aWhat == eAnimationsOnly) {
     mAnimationsPaused += aIncrease;
   } else {
     mEventsSuppressed += aIncrease;
   }
+
+  UpdateFrameRequestCallbackSchedulingState();
 
   SuppressArgs args = { aWhat, aIncrease };
   EnumerateSubDocuments(SuppressEventHandlingInDocument, &args);
@@ -9708,10 +9727,6 @@ nsDocument::MaybePreLoadImage(nsIURI* uri, const nsAString &aCrossOriginAttr,
 void
 nsDocument::MaybePreconnect(nsIURI* aOrigURI, mozilla::CORSMode aCORSMode)
 {
-  // Tor Browser: Here we disable <link rel="preconnect">
-  // See #16998.
-  // TODO: Isolate preconnect by first party.
-/*
   nsCOMPtr<nsIURI> uri;
   if (NS_FAILED(aOrigURI->Clone(getter_AddRefs(uri)))) {
       return;
@@ -9748,7 +9763,6 @@ nsDocument::MaybePreconnect(nsIURI* aOrigURI, mozilla::CORSMode aCORSMode)
   } else {
     speculator->SpeculativeConnectIsolated(uri, firstPartyHost, nullptr);
   }
-*/
 }
 
 void
@@ -10209,15 +10223,10 @@ nsIDocument::ScheduleFrameRequestCallback(FrameRequestCallback& aCallback,
   }
   int32_t newHandle = ++mFrameRequestCallbackCounter;
 
-  bool alreadyRegistered = !mFrameRequestCallbacks.IsEmpty();
   DebugOnly<FrameRequest*> request =
     mFrameRequestCallbacks.AppendElement(FrameRequest(aCallback, newHandle));
   NS_ASSERTION(request, "This is supposed to be infallible!");
-  if (!alreadyRegistered && mPresShell && IsEventHandlingEnabled() &&
-      !AnimationsPaused()) {
-    mPresShell->GetPresContext()->RefreshDriver()->
-      ScheduleFrameRequestCallbacks(this);
-  }
+  UpdateFrameRequestCallbackSchedulingState();
 
   *aHandle = newHandle;
   return NS_OK;
@@ -10227,11 +10236,8 @@ void
 nsIDocument::CancelFrameRequestCallback(int32_t aHandle)
 {
   // mFrameRequestCallbacks is stored sorted by handle
-  if (mFrameRequestCallbacks.RemoveElementSorted(aHandle) &&
-      mFrameRequestCallbacks.IsEmpty() &&
-      mPresShell && IsEventHandlingEnabled()) {
-    mPresShell->GetPresContext()->RefreshDriver()->
-      RevokeFrameRequestCallbacks(this);
+  if (mFrameRequestCallbacks.RemoveElementSorted(aHandle)) {
+    UpdateFrameRequestCallbackSchedulingState();
   }
 }
 
@@ -12915,6 +12921,24 @@ nsIDocument::SetPageUseCounter(UseCounter aUseCounter)
   }
 
   contentParent->SetChildDocumentUseCounter(aUseCounter);
+}
+
+bool
+nsIDocument::InlineScriptAllowedByCSP()
+{
+  nsCOMPtr<nsIContentSecurityPolicy> csp;
+  nsresult rv = NodePrincipal()->GetCsp(getter_AddRefs(csp));
+  NS_ENSURE_SUCCESS(rv, true);
+  bool allowsInlineScript = true;
+  if (csp) {
+    nsresult rv = csp->GetAllowsInline(nsIContentPolicy::TYPE_SCRIPT,
+                                       EmptyString(), // aNonce
+                                       EmptyString(), // FIXME get script sample (bug 1314567)
+                                       0,             // aLineNumber
+                                       &allowsInlineScript);
+    NS_ENSURE_SUCCESS(rv, true);
+  }
+  return allowsInlineScript;
 }
 
 static bool

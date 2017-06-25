@@ -697,6 +697,7 @@ function getUpdatesDir() {
   return getUpdateDirCreate([DIR_UPDATES, "0"]);
 }
 
+/**
  * Reads the update state from the update.status file in the specified
  * directory.
  * @param   dir
@@ -1510,6 +1511,15 @@ function Update(update) {
       let osVersion = Services.sysinfo.getProperty("version");
       this.unsupported = (Services.vc.compare(osVersion, minOSVersion) < 0);
     } catch (e) {}
+  }
+  if (!this.unsupported && update.hasAttribute("minSupportedInstructionSet")) {
+    let minInstructionSet = update.getAttribute("minSupportedInstructionSet");
+    if (['MMX', 'SSE', 'SSE2', 'SSE3',
+        'SSE4A', 'SSE4_1', 'SSE4_2'].indexOf(minInstructionSet) >= 0) {
+      try {
+        this.unsupported = !Services.sysinfo.getProperty("has" + minInstructionSet);
+      } catch (e) {}
+    }
   }
 
   if (this._patches.length == 0 && !this.unsupported) {

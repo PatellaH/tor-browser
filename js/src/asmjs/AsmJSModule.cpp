@@ -72,12 +72,13 @@ static const uint32_t MaxWasmCodeAllocations = 16384;
 static uint8_t*
 AllocateExecutableMemory(ExclusiveContext* cx, size_t bytes)
 {
-    // Allocate RW memory. DynamicallyLinkModule will reprotect the code as RX.
-    unsigned permissions =
-        ExecutableAllocator::initialProtectionFlags(ExecutableAllocator::Writable);
+    // bytes is a multiple of the system's page size, but not necessarily
+    // a multiple of ExecutableCodePageSize.
+    bytes = JS_ROUNDUP(bytes, ExecutableCodePageSize);
+
     void* p = nullptr;
     if (wasmCodeAllocations++ < MaxWasmCodeAllocations)
-        p = AllocateExecutableMemory(nullptr, bytes, permissions, "asm-js-code", AsmJSPageSize);
+        p = AllocateExecutableMemory(bytes, ProtectionSetting::Writable);
     if (!p) {
         wasmCodeAllocations--;
         ReportOutOfMemory(cx);
@@ -133,9 +134,10 @@ AsmJSModule::~AsmJSModule()
             exitDatum.baselineScript->removeDependentAsmJSModule(exit);
         }
 
+        uint32_t size = JS_ROUNDUP(pod.totalBytes_, ExecutableCodePageSize);
         MOZ_ASSERT(wasmCodeAllocations > 0);
         wasmCodeAllocations--;
-        DeallocateExecutableMemory(code_, pod.totalBytes_, AsmJSPageSize);
+        DeallocateExecutableMemory(code_, size);
     }
 
     if (prevLinked_)

@@ -1235,9 +1235,11 @@ IonBuilder::initScopeChain(MDefinition* callee)
         current->add(scope);
 
         // This reproduce what is done in CallObject::createForFunction. Skip
-        // this for analyses, as the script might not have a baseline script
-        // with template objects yet.
-        if (fun->needsCallObject() && !info().isAnalysis()) {
+        // this for the arguments analysis, as the script might not have a
+        // baseline script with template objects yet.
+        if (fun->needsCallObject() &&
+            info().analysisMode() != Analysis_ArgumentsUsage)
+        {
             if (fun->isNamedLambda()) {
                 scope = createDeclEnvObject(callee, scope);
                 if (!scope)
@@ -6135,6 +6137,9 @@ IonBuilder::getSingletonPrototype(JSFunction* target)
 MDefinition*
 IonBuilder::createThisScriptedSingleton(JSFunction* target, MDefinition* callee)
 {
+    if (!target->hasScript())
+        return nullptr;
+
     // Get the singleton prototype (if exists)
     JSObject* proto = getSingletonPrototype(target);
     if (!proto)
@@ -6361,7 +6366,12 @@ IonBuilder::jsop_funapply(uint32_t argc)
     if (argument->type() != MIRType_MagicOptimizedArguments) {
         // Optimize fun.apply(self, array) if the length is sane and there are no holes.
         TemporaryTypeSet* objTypes = argument->resultTypeSet();
-        if (native && native->isNative() && native->native() == fun_apply &&
+#ifdef XP_WIN
+        bool opt = false;
+#else
+        bool opt = true;
+#endif
+        if (opt && native && native->isNative() && native->native() == fun_apply &&
             objTypes &&
             objTypes->getKnownClass(constraints()) == &ArrayObject::class_ &&
             !objTypes->hasObjectFlags(constraints(), OBJECT_FLAG_LENGTH_OVERFLOW) &&
